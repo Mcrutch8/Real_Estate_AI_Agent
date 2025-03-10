@@ -12,86 +12,140 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import (
-    PropertyDetailsInput, PropertyDetailsOutput, get_property_details
+    PropertyDetailsInput, PropertyDetailsOutput, get_property_details, 
+    get_property_details_rentcast, property_details_rentcast
 )
 
 # Define the agent state
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     
-# Define the property details tool
+# Define a simpler property details tool
 @tool
 def property_details(address: str) -> str:
     """
-    Get detailed information for a property based on its address.
+    Get property details for a given address.
     
     Args:
-        address: The full address of the property to get details for
+        address: The property address to look up
         
     Returns:
-        A formatted property description ready to be shown to the user
+        A description of the property
     """
-    input_data = PropertyDetailsInput(address=address)
-    result = get_property_details(input_data)
+    print("\n===== CALLING ATTOM API TOOL =====")
+    print(f"Searching for property: {address}")
+    print("==================================\n")
+    # Import needed here to avoid circular imports
+    import os
+    import http.client
+    import urllib.parse
+    import json
+    import re
+    from dotenv import load_dotenv
     
-    # Print the raw result for debugging
-    print(f"DEBUG: Raw property details result: {result}")
+    # Load API key
+    load_dotenv()
+    api_key = os.environ.get("ATTOM_API_KEY")
     
-    # Create a detailed, conversational summary of the property info
-    # Prepare information about the last sale if available
-    sold_info = ""
-    if result.last_sold_date and result.last_sold_price:
-        sold_info = f"The property was last sold in {result.last_sold_date} for {result.last_sold_price}."
+    if not api_key:
+        return "Error: API key not found in environment variables."
     
-    # Format bathrooms nicely
-    bathroom_text = f"{result.bathrooms}"
-    if result.bathrooms == int(result.bathrooms):
-        bathroom_text = f"{int(result.bathrooms)}"
-    elif result.bathrooms == int(result.bathrooms) + 0.5:
-        bathroom_text = f"{int(result.bathrooms)} and a half"
+    # Parse address
+    address_parts = address.split(',', 1)
+    address1 = address_parts[0].strip()
+    address2 = address_parts[1].strip() if len(address_parts) > 1 else ""
     
-    # Format living space with commas for thousands
-    formatted_sqft = f"{result.square_footage:,}" if result.square_footage else "0"
+    # URL encode address parts
+    encoded_address1 = urllib.parse.quote(address1)
+    encoded_address2 = urllib.parse.quote(address2) if address2 else ""
     
-    # Prepare property age context
-    current_year = 2025  # Using the current year from context
-    property_age = current_year - result.year_built if result.year_built > 0 else None
-    age_context = ""
-    if property_age:
-        if property_age < 5:
-            age_context = "a brand new"
-        elif property_age < 10:
-            age_context = "a newer"
-        elif property_age < 20:
-            age_context = "a well-maintained"
-        elif property_age < 40:
-            age_context = "an established"
-        elif property_age < 75:
-            age_context = "a classic"
-        else:
-            age_context = "a historic"
-    elif result.year_built == 0:
-        age_context = "a"  # If year built is unknown
-    else:
-        age_context = "a"
+    # Create path
+    path = f"/propertyapi/v1.0.0/property/detail?address1={encoded_address1}"
+    if encoded_address2:
+        path += f"&address2={encoded_address2}"
     
-    # Create the property description directly as a string
-    description = f"""I found {age_context} {result.property_type.lower()} located at {result.address}. 
-
-This home features {result.bedrooms} bedroom{'s' if result.bedrooms != 1 else ''} and {bathroom_text} bathroom{'s' if result.bathrooms != 1 else ''} with approximately {formatted_sqft} square feet of living space. {'Built in ' + str(result.year_built) + ', ' if result.year_built > 0 else ''}The property sits on a {result.lot_size} lot.
-
-The estimated current value of this property is {result.estimated_value}. {sold_info}
-
-Would you like to know more about this property or would you like me to help you analyze specific aspects of it?"""
-    
-    # Print the final description for debugging
-    print(f"DEBUG: Final property description being returned:\n{description}")
-    
-    # Return the description directly as a string - no JSON encoding
-    return description
+    # Make API request
+    try:
+        conn = http.client.HTTPSConnection("api.gateway.attomdata.com")
+        headers = {
+            'accept': "application/json",
+            'apikey': api_key
+        }
+        
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        data = response.read().decode('utf-8')
+        conn.close()
+        
+        # Parse response
+        json_data = json.loads(data)
+        
+        # Check if property was found
+        if "property" not in json_data or len(json_data["property"]) == 0:
+            return f"No property found for address: {address}"
+        
+        # Get property data
+        property_data = json_data["property"][0]
+        
+        # Extract essential property details
+        address_obj = property_data.get("address", {})
+        full_address = f"{address_obj.get('line1', '')}, {address_obj.get('line2', '')}"
+        
+        building = property_data.get("building", {})
+        rooms = building.get("rooms", {})
+        bedrooms = rooms.get("beds", 0) or rooms.get("bedsnum", 0)
+        bathrooms = rooms.get("bathstotal", 0)
+        if not bathrooms:
+            full_baths = rooms.get("bathsfull", 0) or 0
+            half_baths = rooms.get("bathshalf", 0) or 0
+            bathrooms = full_baths + (half_baths * 0.5)
+            
+        size = building.get("size", {})
+        square_feet = size.get("livingsize", 0) or size.get("universalsize", 0) or 0
+        year_built = building.get("yearbuilt", 0) or 0
+        
+        lot = property_data.get("lot", {})
+        lot_size = f"{lot.get('lotsize1', 0)} {lot.get('lotsize1unit', 'sq ft')}"
+        
+        summary = property_data.get("summary", {})
+        property_type = summary.get("proptype", "Unknown")
+        if property_type == "SFR":
+            property_type = "Single Family Residence"
+        elif property_type == "CONDO":
+            property_type = "Condominium"
+        elif property_type == "TWNHS":
+            property_type = "Townhouse"
+            
+        assessment = property_data.get("assessment", {})
+        market = assessment.get("market", {})
+        market_value = market.get("mktttlvalue")
+        estimated_value = f"${market_value:,}" if market_value else "Not available"
+        
+        sale = property_data.get("sale", {})
+        sale_date = sale.get("salesearchdate", "")
+        amount = sale.get("amount", {})
+        sale_price = amount.get("saleamt")
+        last_sold_price = f"${sale_price:,}" if sale_price else "Unknown"
+        
+        # Format property details as bulleted list
+        result = f"""PROPERTY DETAILS:
+• Address: {full_address}
+• Property Type: {property_type}
+• Bedrooms: {bedrooms}
+• Bathrooms: {bathrooms}
+• Square Footage: {square_feet:,} sq ft
+• Year Built: {year_built if year_built > 0 else "Unknown"}
+• Lot Size: {lot_size}
+• Estimated Value: {estimated_value}
+• Last Sold: {sale_date} for {last_sold_price if sale_price else "Unknown"}
+"""
+        return result
+        
+    except Exception as e:
+        return f"Error retrieving property details: {str(e)}"
 
 # Create the tools list
-tools = [property_details]
+tools = [property_details, property_details_rentcast]
 
 # Define the system prompt for the agent
 SYSTEM_PROMPT = """You are an experienced, friendly AI Real Estate Agent assistant designed to help independent home buyers.
@@ -100,33 +154,41 @@ You specialize in helping buyers find and evaluate properties that meet their ne
 IMPORTANT: When a new user starts a conversation with you, your first response should ask them to provide a property address they'd like to learn more about.
 
 You have access to the following tools:
-1. property_details - Get detailed information about a property based on its address
+1. property_details - Get detailed information about a property based on its address using the ATTOM API
+2. property_details_rentcast - Get detailed information about a property based on its address using the Rentcast API
+
+IMPORTANT: For each property search, you should use BOTH tools to get comprehensive information. Each API may provide different details that complement each other. Use all available information from both tools when responding to users.
 
 IMPORTANT PRESENTATION INSTRUCTIONS:
-- The property_details tool will return a formatted property description
-- This description is ALREADY in a conversational format, ready to be displayed to the user
-- You MUST present this text EXACTLY as returned by the tool, without modification
-- Do NOT try to summarize or rewrite the property details - simply show what the tool returned
-- EXAMPLE: If the tool returns "I found a lovely home at 123 Main St...", your response should include that exact text
-- After presenting the description, be prepared to answer questions about the property
-- Always maintain a warm, professional, and helpful tone in your responses
+- Both property_details tools will return bulleted lists of property information
+- COMBINE the information from both APIs and TRANSFORM the data into an engaging, conversational description
+- Use ALL the information provided in both API responses, resolving any discrepancies by mentioning both data points
+- If the two APIs provide different values for the same property attribute (e.g., different square footage or year built), mention both values
+- DO NOT say "according to ATTOM" or "according to Rentcast" or reference the data sources directly
+- DO NOT mention bullet points - speak naturally as a real estate agent
+- Add professional real estate agent context and insights where appropriate
+- For example, if it's an older home, mention charm/character; if newer, mention modern amenities
+- Calculate and mention the price per square foot if both the estimated value and square footage are available
+- Keep a warm, enthusiastic tone throughout your description
+- End by asking if they'd like to know more about any specific aspect of the property
 
 CONVERSATION FLOW:
-- Always ask for a property address first if the user hasn't provided one
-- When the user provides an address, use the property_details tool to get information
-- Present the property using the description returned from the tool
-- If the user asks follow-up questions about the property, use the structured data fields to provide accurate answers
-- Be warm, friendly, and professional, as if you were a real estate agent meeting a client
-- If a user asks about something you don't have information on, politely acknowledge the limitations
+- Ask for an address first if not provided
+- Use BOTH the property_details AND property_details_rentcast tools to get comprehensive property information
+- Combine all the data from both sources into a single, comprehensive understanding of the property
+- Present the property in a conversational, engaging way, using the combined information
+- Answer follow-up questions using all the information you received from both APIs
+- If you don't have certain information, politely acknowledge the limitation
+- Suggest other details they might be interested in
 
-EXAMPLE QUESTIONS USERS MIGHT ASK AFTER SEEING PROPERTY DETAILS:
-- "How does the price compare to similar properties in the area?" (Note: You don't have this data yet, so explain you'd need to look that up)
-- "What's the price per square foot?"
-- "How old is the property?"
-- "Is it a good investment?"
-- "What's the neighborhood like?" (Note: You don't have this data yet, so explain you'd need to look that up)
+SAMPLE RESPONSE FORMAT:
+"I found information about [address]! This is a lovely [property_type] featuring [bedrooms] bedrooms and [bathrooms] bathrooms, with approximately [square_footage] square feet of living space. Built in [year], the home sits on a [lot_size] lot and is currently valued at approximately [estimated_value].
 
-Always try to be helpful and informative, focusing on the property details you do have available."""
+[Add any insights about the price, size, location, etc.]
+
+Would you like to know more about any specific aspect of this property?"
+
+Always be helpful, enthusiastic, and provide as much value as possible with the information available."""
 
 def create_agent():
     """Create and return the agent graph."""

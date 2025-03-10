@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional
 import requests
 from pydantic import BaseModel, Field
+from langchain_core.tools import tool
 
 class PropertyDetailsInput(BaseModel):
     address: str = Field(..., description="The full address of the property to get details for")
@@ -17,7 +18,7 @@ class PropertyDetailsOutput(BaseModel):
     last_sold_date: Optional[str] = Field(None, description="Date the property was last sold")
     last_sold_price: Optional[str] = Field(None, description="Price the property was last sold for")
     photos: List[str] = Field(..., description="URLs to property photos")
-    property_id: str = Field(..., description="The ATTOM property ID for use in other API calls")
+    property_id: str = Field(..., description="The property ID for use in other API calls")
 
 def get_property_details(input_data: PropertyDetailsInput) -> PropertyDetailsOutput:
     """
@@ -429,6 +430,390 @@ def test_corelogic_api(api_key: str = None):
             
         # Close the connection
         conn.close()
+        
+    except Exception as e:
+        print(f"ERROR: Exception occurred while testing API: {str(e)}")
+
+def get_property_details_rentcast(input_data: PropertyDetailsInput) -> PropertyDetailsOutput:
+    """
+    Get detailed information for a property based on its address using the Rentcast API.
+    
+    Args:
+        input_data: A PropertyDetailsInput object containing the address
+        
+    Returns:
+        A PropertyDetailsOutput object with property details
+    """
+    import os
+    import json
+    import requests
+    import datetime
+    from dotenv import load_dotenv
+    
+    # Load environment variables to get API key
+    load_dotenv()
+    api_key = os.environ.get("RENTCAST_API_KEY")
+    
+    if not api_key:
+        raise ValueError("API key not found in environment variables. Please add RENTCAST_API_KEY to your .env file.")
+    
+    print(f"DEBUG: Starting property search for address: '{input_data.address}'")
+    
+    # Prepare API URL
+    base_url = "https://api.rentcast.io/v1/properties"
+    address_param = input_data.address
+    
+    # Prepare headers
+    headers = {
+        "accept": "application/json",
+        "X-Api-Key": api_key
+    }
+    
+    print(f"DEBUG: Using API key: {api_key[:5]}...{api_key[-5:] if len(api_key) > 10 else ''}")
+    print(f"DEBUG: Request URL: {base_url}?address={address_param}")
+    print(f"DEBUG: Request headers: {headers}")
+    
+    try:
+        # Make the GET request to Rentcast API
+        response = requests.get(
+            f"{base_url}?address={address_param}",
+            headers=headers
+        )
+        
+        # Check for successful response
+        response.raise_for_status()
+        
+        # Parse the JSON response
+        search_data = response.json()
+        print(f"DEBUG: API response parsed successfully")
+        
+        # Log the structure of the response for debugging
+        print(f"DEBUG: Response structure: {search_data[:100] if isinstance(search_data, list) else 'Not a list'}")
+        
+        # Check if we have properties in the response
+        if not search_data or len(search_data) == 0:
+            print(f"DEBUG: No properties found in API response.")
+            raise ValueError(f"No properties found for address: {input_data.address}")
+            
+        print(f"DEBUG: Found {len(search_data)} properties in response")
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"DEBUG: HTTP error occurred: {str(e)}")
+        raise ValueError(f"HTTP error when calling Rentcast API: {str(e)}")
+        
+    except json.JSONDecodeError as e:
+        print(f"DEBUG: Failed to parse API response as JSON: {str(e)}")
+        raise ValueError(f"Failed to parse Rentcast API response as JSON: {str(e)}")
+        
+    except Exception as e:
+        print(f"DEBUG: Unexpected error: {str(e)}")
+        raise ValueError(f"Unexpected error when calling Rentcast API: {str(e)}")
+    
+    # Get the first property from the results
+    property_data = search_data[0]
+    
+    # Print some of the property data for debugging
+    print(f"DEBUG: First property data: {str(property_data)[:500]}...")
+    
+    # Extract property ID
+    property_id = property_data.get("id", "Unknown")
+    print(f"DEBUG: Found property with Rentcast ID: {property_id}")
+    
+    # Get full formatted address
+    full_address = property_data.get("formattedAddress", "")
+    
+    # Extract property details
+    bedrooms = property_data.get("bedrooms", 0)
+    bathrooms = property_data.get("bathrooms", 0)
+    square_footage = property_data.get("squareFootage", 0)
+    year_built = property_data.get("yearBuilt", 0)
+    
+    # Get lot size
+    lot_size_value = property_data.get("lotSize", 0)
+    lot_size = f"{lot_size_value} sq ft"
+    
+    # Get property type
+    property_type = property_data.get("propertyType", "Unknown")
+    
+    # Get estimated value - use the latest tax assessment if available
+    tax_assessments = property_data.get("taxAssessments", {})
+    estimated_value = "Not available"
+    if tax_assessments:
+        # Find the most recent tax assessment year
+        latest_year = max([int(year) for year in tax_assessments.keys()], default=0)
+        if latest_year > 0:
+            latest_assessment = tax_assessments.get(str(latest_year), {})
+            assessment_value = latest_assessment.get("value", 0)
+            if assessment_value:
+                estimated_value = f"${assessment_value:,}"
+    
+    # Get last sale information
+    history = property_data.get("history", {})
+    last_sold_date = None
+    last_sold_price = None
+    
+    if history:
+        # Find the most recent sale date
+        sale_dates = [date for date in history.keys() if history[date].get("event") == "Sale"]
+        if sale_dates:
+            most_recent_sale_date = max(sale_dates)
+            sale_info = history.get(most_recent_sale_date, {})
+            
+            # Format the date
+            if "date" in sale_info:
+                date_str = sale_info["date"]
+                try:
+                    # Parse the ISO date format
+                    date_obj = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    last_sold_date = date_obj.strftime("%B %d, %Y")
+                except (ValueError, TypeError):
+                    last_sold_date = date_str
+            
+            # Get the sale price
+            if "price" in sale_info:
+                price = sale_info["price"]
+                last_sold_price = f"${price:,}"
+    
+    # Rentcast API doesn't provide photos directly
+    photos = []
+    
+    # Print debug info for key fields
+    print(f"DEBUG: Extracted address: {full_address}")
+    print(f"DEBUG: Extracted bedrooms: {bedrooms}")
+    print(f"DEBUG: Extracted bathrooms: {bathrooms}")
+    print(f"DEBUG: Extracted square footage: {square_footage}")
+    print(f"DEBUG: Extracted year built: {year_built}")
+    print(f"DEBUG: Extracted property type: {property_type}")
+    print(f"DEBUG: Extracted estimated value: {estimated_value}")
+    print(f"DEBUG: Extracted last sold date: {last_sold_date}")
+    print(f"DEBUG: Extracted last sold price: {last_sold_price}")
+    
+    # Create the output object
+    output = PropertyDetailsOutput(
+        address=full_address,
+        bedrooms=int(bedrooms) if bedrooms else 0,
+        bathrooms=float(bathrooms) if bathrooms else 0,
+        square_footage=int(square_footage) if square_footage else 0,
+        year_built=int(year_built) if year_built else 0,
+        lot_size=lot_size,
+        property_type=property_type,
+        estimated_value=estimated_value,
+        last_sold_date=last_sold_date,
+        last_sold_price=last_sold_price,
+        photos=photos,
+        property_id=property_id
+    )
+    
+    print(f"DEBUG: Final output object: {output}")
+    return output
+
+# Add a tool that uses the Rentcast API for property details
+@tool
+def property_details_rentcast(address: str) -> str:
+    """
+    Get property details for a given address using the Rentcast API.
+    
+    Args:
+        address: The property address to look up
+        
+    Returns:
+        A description of the property
+    """
+    print("\n===== CALLING RENTCAST API TOOL =====")
+    print(f"Searching for property: {address}")
+    print("====================================\n")
+    # Import needed here to avoid circular imports
+    import os
+    import requests
+    import json
+    import datetime
+    from dotenv import load_dotenv
+    
+    # Load API key
+    load_dotenv()
+    api_key = os.environ.get("RENTCAST_API_KEY")
+    
+    if not api_key:
+        return "Error: API key not found in environment variables. Please add RENTCAST_API_KEY to your .env file."
+    
+    # Prepare API URL
+    base_url = "https://api.rentcast.io/v1/properties"
+    address_param = address
+    
+    # Prepare headers
+    headers = {
+        "accept": "application/json",
+        "X-Api-Key": api_key
+    }
+    
+    # Make the API request
+    try:
+        response = requests.get(
+            f"{base_url}?address={address_param}",
+            headers=headers
+        )
+        
+        # Check for successful response
+        response.raise_for_status()
+        
+        # Parse the JSON response
+        json_data = response.json()
+        
+        # Check if property was found
+        if not json_data or len(json_data) == 0:
+            return f"No property found for address: {address}"
+        
+        # Get the first property from the results
+        property_data = json_data[0]
+        
+        # Extract essential property details
+        full_address = property_data.get("formattedAddress", "")
+        bedrooms = property_data.get("bedrooms", 0)
+        bathrooms = property_data.get("bathrooms", 0)
+        square_footage = property_data.get("squareFootage", 0)
+        year_built = property_data.get("yearBuilt", 0)
+        
+        # Get lot size
+        lot_size = f"{property_data.get('lotSize', 0)} sq ft"
+        
+        # Get property type
+        property_type = property_data.get("propertyType", "Unknown")
+        
+        # Get estimated value - use the latest tax assessment
+        tax_assessments = property_data.get("taxAssessments", {})
+        estimated_value = "Not available"
+        if tax_assessments:
+            # Find the most recent tax assessment year
+            latest_year = max([int(year) for year in tax_assessments.keys()], default=0)
+            if latest_year > 0:
+                latest_assessment = tax_assessments.get(str(latest_year), {})
+                assessment_value = latest_assessment.get("value", 0)
+                if assessment_value:
+                    estimated_value = f"${assessment_value:,}"
+        
+        # Get last sale information
+        history = property_data.get("history", {})
+        last_sold_date = "Unknown"
+        last_sold_price = "Unknown"
+        
+        if history:
+            # Find the most recent sale date
+            sale_dates = [date for date in history.keys() if history[date].get("event") == "Sale"]
+            if sale_dates:
+                most_recent_sale_date = max(sale_dates)
+                sale_info = history.get(most_recent_sale_date, {})
+                
+                # Get date
+                if "date" in sale_info:
+                    date_str = sale_info["date"]
+                    try:
+                        date_obj = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        last_sold_date = date_obj.strftime("%B %d, %Y")
+                    except (ValueError, TypeError):
+                        last_sold_date = date_str
+                
+                # Get price
+                if "price" in sale_info:
+                    price = sale_info["price"]
+                    last_sold_price = f"${price:,}"
+        
+        # Format property details as bulleted list
+        result = f"""PROPERTY DETAILS:
+• Address: {full_address}
+• Property Type: {property_type}
+• Bedrooms: {bedrooms}
+• Bathrooms: {bathrooms}
+• Square Footage: {square_footage:,} sq ft
+• Year Built: {year_built if year_built > 0 else "Unknown"}
+• Lot Size: {lot_size}
+• Estimated Value: {estimated_value}
+• Last Sold: {last_sold_date} for {last_sold_price}
+"""
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        return f"Error retrieving property details: HTTP error - {str(e)}"
+    except json.JSONDecodeError as e:
+        return f"Error retrieving property details: Invalid JSON response - {str(e)}"
+    except Exception as e:
+        return f"Error retrieving property details: {str(e)}"
+
+# Function to test Rentcast API connectivity directly
+def test_rentcast_api(api_key: str = None):
+    """
+    Test function to check if the Rentcast API is working correctly.
+    
+    Args:
+        api_key: Optional API key, if not provided it will be loaded from environment
+    """
+    import os
+    import requests
+    import json
+    from dotenv import load_dotenv
+    
+    if not api_key:
+        # Load environment variables to get API key
+        load_dotenv()
+        api_key = os.environ.get("RENTCAST_API_KEY")
+    
+    if not api_key:
+        print("ERROR: No API key provided and no API key found in environment variables.")
+        return
+    
+    # Test with a simple API call
+    test_address = "5500 Grand Lake Dr, San Antonio, TX 78244"
+    base_url = "https://api.rentcast.io/v1/properties"
+    
+    # Headers for the API call
+    headers = {
+        "accept": "application/json",
+        "X-Api-Key": api_key
+    }
+    
+    print(f"Making test API call to Rentcast API with API key: {api_key[:5]}...{api_key[-5:] if len(api_key) > 10 else ''}")
+    print(f"URL: {base_url}?address={test_address}")
+    print(f"Headers: {headers}")
+    
+    try:
+        # Make the request
+        response = requests.get(
+            f"{base_url}?address={test_address}",
+            headers=headers
+        )
+        
+        print(f"Response Status: {response.status_code} {response.reason}")
+        
+        # Check if response is successful
+        if response.status_code == 200:
+            # Try to parse as JSON
+            try:
+                json_data = response.json()
+                
+                # Print limited content to avoid overwhelming the console
+                content = json.dumps(json_data, indent=2)[:1000] + ("..." if len(json.dumps(json_data)) > 1000 else "")
+                print(f"Response Content: {content}")
+                
+                if json_data and len(json_data) > 0:
+                    print("Test SUCCESSFUL! API is working correctly and returning property data.")
+                    print(f"Found {len(json_data)} properties.")
+                    
+                    # Print some basic info about the first property
+                    if len(json_data) > 0:
+                        prop = json_data[0]
+                        print(f"First property: {prop.get('formattedAddress', 'Unknown')}")
+                        print(f"Property Type: {prop.get('propertyType', 'Unknown')}")
+                        print(f"Bedrooms: {prop.get('bedrooms', 'Unknown')}")
+                        print(f"Bathrooms: {prop.get('bathrooms', 'Unknown')}")
+                else:
+                    print("API returned successfully but no properties were found.")
+                    
+            except json.JSONDecodeError:
+                print("WARNING: Response is not valid JSON.")
+                print(f"Raw response: {response.text[:1000]}...")
+            
+        else:
+            print(f"ERROR: API returned status code {response.status_code}")
+            print(f"Response: {response.text[:1000]}...")
         
     except Exception as e:
         print(f"ERROR: Exception occurred while testing API: {str(e)}")
