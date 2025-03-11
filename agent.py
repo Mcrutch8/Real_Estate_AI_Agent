@@ -13,7 +13,9 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import (
     PropertyDetailsInput, PropertyDetailsOutput, get_property_details, 
-    get_property_details_rentcast, property_details_rentcast
+    get_property_details_rentcast, property_details_rentcast,
+    PropertyValuationInput, PropertyValuationOutput, get_property_valuation, property_valuation,
+    property_details_realty
 )
 
 # Define the agent state
@@ -34,13 +36,12 @@ def property_details(address: str) -> str:
     """
     print("\n===== CALLING ATTOM API TOOL =====")
     print(f"Searching for property: {address}")
-    print("==================================\n")
+    
     # Import needed here to avoid circular imports
     import os
     import http.client
     import urllib.parse
     import json
-    import re
     from dotenv import load_dotenv
     
     # Load API key
@@ -87,65 +88,19 @@ def property_details(address: str) -> str:
         # Get property data
         property_data = json_data["property"][0]
         
-        # Extract essential property details
-        address_obj = property_data.get("address", {})
-        full_address = f"{address_obj.get('line1', '')}, {address_obj.get('line2', '')}"
+        # Print the entire raw JSON data for debugging
+        print("\n=========== ATTOM FULL RAW JSON DATA ===========")
+        print(json.dumps(property_data, indent=2))
+        print("================================================\n")
         
-        building = property_data.get("building", {})
-        rooms = building.get("rooms", {})
-        bedrooms = rooms.get("beds", 0) or rooms.get("bedsnum", 0)
-        bathrooms = rooms.get("bathstotal", 0)
-        if not bathrooms:
-            full_baths = rooms.get("bathsfull", 0) or 0
-            half_baths = rooms.get("bathshalf", 0) or 0
-            bathrooms = full_baths + (half_baths * 0.5)
-            
-        size = building.get("size", {})
-        square_feet = size.get("livingsize", 0) or size.get("universalsize", 0) or 0
-        year_built = building.get("yearbuilt", 0) or 0
-        
-        lot = property_data.get("lot", {})
-        lot_size = f"{lot.get('lotsize1', 0)} {lot.get('lotsize1unit', 'sq ft')}"
-        
-        summary = property_data.get("summary", {})
-        property_type = summary.get("proptype", "Unknown")
-        if property_type == "SFR":
-            property_type = "Single Family Residence"
-        elif property_type == "CONDO":
-            property_type = "Condominium"
-        elif property_type == "TWNHS":
-            property_type = "Townhouse"
-            
-        assessment = property_data.get("assessment", {})
-        market = assessment.get("market", {})
-        market_value = market.get("mktttlvalue")
-        estimated_value = f"${market_value:,}" if market_value else "Not available"
-        
-        sale = property_data.get("sale", {})
-        sale_date = sale.get("salesearchdate", "")
-        amount = sale.get("amount", {})
-        sale_price = amount.get("saleamt")
-        last_sold_price = f"${sale_price:,}" if sale_price else "Unknown"
-        
-        # Format property details as bulleted list
-        result = f"""PROPERTY DETAILS:
-• Address: {full_address}
-• Property Type: {property_type}
-• Bedrooms: {bedrooms}
-• Bathrooms: {bathrooms}
-• Square Footage: {square_feet:,} sq ft
-• Year Built: {year_built if year_built > 0 else "Unknown"}
-• Lot Size: {lot_size}
-• Estimated Value: {estimated_value}
-• Last Sold: {sale_date} for {last_sold_price if sale_price else "Unknown"}
-"""
-        return result
+        # Return the entire property data as JSON string
+        return json.dumps(property_data, indent=2)
         
     except Exception as e:
         return f"Error retrieving property details: {str(e)}"
 
 # Create the tools list
-tools = [property_details, property_details_rentcast]
+tools = [property_details, property_details_rentcast, property_details_realty, property_valuation]
 
 # Define the system prompt for the agent
 SYSTEM_PROMPT = """You are an experienced, friendly AI Real Estate Agent assistant designed to help independent home buyers.
@@ -156,33 +111,60 @@ IMPORTANT: When a new user starts a conversation with you, your first response s
 You have access to the following tools:
 1. property_details - Get detailed information about a property based on its address using the ATTOM API
 2. property_details_rentcast - Get detailed information about a property based on its address using the Rentcast API
+3. property_details_realty - Get detailed information about a property based on its address using the Realty in US API
+4. property_valuation - Get a detailed property valuation report with estimated value and comparable properties in the area
 
-IMPORTANT: For each property search, you should use BOTH tools to get comprehensive information. Each API may provide different details that complement each other. Use all available information from both tools when responding to users.
+IMPORTANT: For each property search, use tools 1, 2, and 3 to get comprehensive property information from all three different APIs. Each API may provide different details that complement each other. 
+
+When users ask about property value, market analysis, or comparables in the area, use tool 3 (property_valuation) to provide a thorough valuation report with comparable properties. IMPORTANT: When calling the property_valuation tool, pass all property details you know (property_type, bedrooms, bathrooms, square_footage) from the previous API calls to get the most accurate valuation.
 
 IMPORTANT PRESENTATION INSTRUCTIONS:
-- Both property_details tools will return bulleted lists of property information
-- COMBINE the information from both APIs and TRANSFORM the data into an engaging, conversational description
-- Use ALL the information provided in both API responses, resolving any discrepancies by mentioning both data points
-- If the two APIs provide different values for the same property attribute (e.g., different square footage or year built), mention both values
-- DO NOT say "according to ATTOM" or "according to Rentcast" or reference the data sources directly
-- DO NOT mention bullet points - speak naturally as a real estate agent
-- Add professional real estate agent context and insights where appropriate
-- For example, if it's an older home, mention charm/character; if newer, mention modern amenities
-- Calculate and mention the price per square foot if both the estimated value and square footage are available
-- Keep a warm, enthusiastic tone throughout your description
-- End by asking if they'd like to know more about any specific aspect of the property
+- All three property_details tools will return raw JSON data from their respective APIs
+- For ATTOM data, find and extract bedroom data from 'building.rooms.beds' or 'building.rooms.bedsnum'
+- For ATTOM data, find and extract bathroom data from 'building.rooms.bathstotal' or calculate from 'bathsfull + (bathshalf * 0.5)'
+- For Rentcast data, find and extract bedroom data from 'bedrooms' field
+- For Rentcast data, find and extract bathroom data from 'bathrooms' field
+- For Realty in US data, find and extract bedroom data from 'description.beds' field
+- For Realty in US data, find and extract bathroom data from 'description.baths' field
+- When describing the property, ALWAYS explicitly state ALL THREE bedroom values by saying: "This home has X bedrooms according to the first source, Y bedrooms according to the second source, and Z bedrooms according to the third source"
+- When describing the property, ALWAYS explicitly state ALL THREE bathroom values by saying: "This home has X bathrooms according to the first source, Y bathrooms according to the second source, and Z bathrooms according to the third source"
+- NEVER simplify, average, or combine these numbers - you MUST report EXACTLY what each API provided
+- Your TOP PRIORITY is accurately reporting the RAW bedroom and bathroom values from all three APIs
+- Report the EXACT values - no rounding or approximations
+
+FOR PROPERTY VALUATION REPORTS:
+- The property_valuation tool will return a detailed valuation report with comparable properties
+- ONLY use the EXACT values provided by the tool - NEVER estimate, round, or make up any values
+- The estimated property values should be quoted EXACTLY as returned by the API - no rounding, adjusting, or "approximately" statements
+- TRANSFORM this data into an engaging market analysis as a knowledgeable real estate agent would
+- Highlight ONLY the insights about property value that are directly based on the valuation data returned
+- Discuss notable comparable properties EXACTLY as they appear in the API response
+- NEVER introduce valuation amounts or price ranges that aren't explicitly in the API response
+- If the API returns an estimated value of $221,000, say EXACTLY "$221,000", not "around $220,000" or "about $200,000"
+- Include insights about comparable properties ONLY if they are actually in the API response
+- Do not offer opinions on whether a property is under or overvalued unless that's explicitly stated in the API response
+- Keep your tone professional but conversational, avoiding technical jargon
 
 CONVERSATION FLOW:
 - Ask for an address first if not provided
-- Use BOTH the property_details AND property_details_rentcast tools to get comprehensive property information
-- Combine all the data from both sources into a single, comprehensive understanding of the property
+- Use ALL THREE property details tools (property_details, property_details_rentcast, AND property_details_realty) to get comprehensive property information
+- Combine all the data from all three sources into a single, comprehensive understanding of the property
 - Present the property in a conversational, engaging way, using the combined information
-- Answer follow-up questions using all the information you received from both APIs
+- ALWAYS explicitly state the bedroom and bathroom counts from all three sources exactly as described above
+- When users express interest in property value, market analysis, or comparable sales:
+  * Use the property_valuation tool to get detailed valuation information
+  * ALWAYS pass all property details you already know (property_type, bedrooms, bathrooms, square_footage) to get the most accurate valuation
+  * Present this as a professional market analysis with insights about the property's value
+- Answer follow-up questions using all the information you received from all APIs
 - If you don't have certain information, politely acknowledge the limitation
-- Suggest other details they might be interested in
+- Suggest other details they might be interested in, including property valuation if they haven't asked about it yet
 
 SAMPLE RESPONSE FORMAT:
-"I found information about [address]! This is a lovely [property_type] featuring [bedrooms] bedrooms and [bathrooms] bathrooms, with approximately [square_footage] square feet of living space. Built in [year], the home sits on a [lot_size] lot and is currently valued at approximately [estimated_value].
+"I found information about [address]! This is a lovely [property_type] property.
+
+According to my sources, this home has X bedrooms according to the first source, Y bedrooms according to the second source, and Z bedrooms according to the third source. It also has X bathrooms according to the first source, Y bathrooms according to the second source, and Z bathrooms according to the third source.
+
+The property has approximately [square_footage] square feet of living space. Built in [year], the home sits on a [lot_size] lot and is currently valued at approximately [estimated_value].
 
 [Add any insights about the price, size, location, etc.]
 
