@@ -16,6 +16,7 @@ from typing import List, Optional
 import requests
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
+from security import safe_requests
 
 # Input/Output models for property data APIs
 
@@ -453,7 +454,7 @@ def get_property_details_rentcast(input_data: PropertyDetailsInput) -> PropertyD
         print(f"DEBUG: Sending request to Rentcast API: {url}")
         print(f"DEBUG: Parameters: {params}")
         
-        response = requests.get(
+        response = safe_requests.get(
             url,
             headers=headers,
             params=params
@@ -652,7 +653,7 @@ def property_details_rentcast(address: str) -> str:
     
     # Make the API request
     try:
-        response = requests.get(
+        response = safe_requests.get(
             f"{base_url}?address={address}",
             headers=headers
         )
@@ -694,7 +695,6 @@ def test_rentcast_api(api_key: str = None):
         api_key: Optional API key, if not provided it will be loaded from environment
     """
     import os
-    import requests
     import json
     from dotenv import load_dotenv
     
@@ -731,7 +731,7 @@ def test_rentcast_api(api_key: str = None):
         # Make the API request
         print("Sending request to API...")
         
-        response = requests.get(
+        response = safe_requests.get(
             f"{base_url}?address={test_address}",
             headers=headers
         )
@@ -884,7 +884,7 @@ def get_property_valuation(input_data: PropertyValuationInput) -> PropertyValuat
     
     try:
         print(f"DEBUG: Sending request to Rentcast AVM API...")
-        response = requests.get(
+        response = safe_requests.get(
             base_url,
             params=params,
             headers=headers
@@ -1039,7 +1039,7 @@ def property_valuation(address: str, property_type: str = None, bedrooms: int = 
     # Make the API request
     try:
         print(f"DEBUG: Sending request to Rentcast AVM API...")
-        response = requests.get(
+        response = safe_requests.get(
             base_url,
             params=params,
             headers=headers
@@ -1223,7 +1223,7 @@ def get_property_details_realty(input_data: PropertyDetailsInput) -> PropertyDet
         print(f"DEBUG: Search URL: {search_url}")
         print(f"DEBUG: Search params: {search_params}")
         
-        search_response = requests.get(
+        search_response = safe_requests.get(
             search_url,
             headers=headers,
             params=search_params
@@ -1259,7 +1259,7 @@ def get_property_details_realty(input_data: PropertyDetailsInput) -> PropertyDet
             "property_id": property_id
         }
         
-        property_response = requests.get(
+        property_response = safe_requests.get(
             property_url,
             headers=headers,
             params=property_params
