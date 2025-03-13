@@ -7,9 +7,9 @@ Run this script directly to test if the Rentcast AVM API is working properly.
 import os
 import sys
 import json
-import requests
 import urllib.parse
 from dotenv import load_dotenv
+from security import safe_requests
 
 def test_rentcast_avm_api():
     """Test the Rentcast AVM API directly."""
@@ -121,7 +121,7 @@ def test_rentcast_avm_api():
         
         try:
             # Make the request
-            response = requests.get(
+            response = safe_requests.get(
                 base_url,
                 params=params,
                 headers=headers
